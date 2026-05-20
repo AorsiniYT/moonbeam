@@ -12,6 +12,16 @@
 
 namespace moonbeam {
 
+// Simple helper to replace all occurrences of a placeholder in a string
+static std::string replaceAll(std::string str, const std::string& from, const std::string& to) {
+    size_t start_pos = 0;
+    while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+        str.replace(start_pos, from.length(), to);
+        start_pos += to.length();
+    }
+    return str;
+}
+
 // Simple, non-dependent JSON line parser for flat key-value files
 static std::map<std::string, std::string> parseSimpleJson(const std::string& filepath) {
     std::map<std::string, std::string> res;
@@ -39,19 +49,11 @@ static std::map<std::string, std::string> parseSimpleJson(const std::string& fil
         if (fourthQuote == std::string::npos) continue;
         
         std::string value = line.substr(thirdQuote + 1, fourthQuote - thirdQuote - 1);
+        value = replaceAll(value, "\\n", "\n");
+        value = replaceAll(value, "\\\"", "\"");
         res[key] = value;
     }
     return res;
-}
-
-// Simple helper to replace all occurrences of a placeholder in a string
-static std::string replaceAll(std::string str, const std::string& from, const std::string& to) {
-    size_t start_pos = 0;
-    while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
-        str.replace(start_pos, from.length(), to);
-        start_pos += to.length();
-    }
-    return str;
 }
 
 // Simple XML tag extractor
@@ -68,13 +70,18 @@ static bool extractTag(const std::string& xml, const char* tag, std::string& out
     return true;
 }
 
+std::map<std::string, std::string> get_lang_en();
+std::map<std::string, std::string> get_lang_es();
+
 ConnectionTester::ConnectionTester(const std::string& host_ip, bool limit_to_2_4ghz, const std::string& device_name, const std::string& lang_code, int http_port, int https_port)
     : ip(host_ip), port_http(http_port), port_https(https_port), cancelled(false), progress_cb(nullptr),
       limit_2_4ghz(limit_to_2_4ghz), device(device_name) {
     if (lang_code.rfind("es", 0) == 0) {
         lang = "es";
+        translations = get_lang_es();
     } else {
         lang = "en";
+        translations = get_lang_en();
     }
 }
 
@@ -303,14 +310,6 @@ bool ConnectionTester::runSpeedTest(float& speed_mbps) {
 TestResult ConnectionTester::run() {
     TestResult result;
     cancelled = false;
-
-    // Load translations using normalized lang ("es" or "en")
-    std::string path1 = "resources/moonbeam/lang/" + lang + ".json";
-    translations = parseSimpleJson(path1);
-    if (translations.empty()) {
-        std::string path2 = "third_party/moonbeam/lang/" + lang + ".json";
-        translations = parseSimpleJson(path2);
-    }
     
     // Built-in fallback mappings: resolve keys using loaded translations, or fallback to the provided default English string
     bool is_es = (lang == "es");
@@ -355,27 +354,34 @@ TestResult ConnectionTester::run() {
     std::string rec;
 
     if (result.packet_loss_pct > 2.0f || result.avg_ping_ms > 50.0f || result.speed_mbps < 3.0f) {
+        result.rating_raw = "Poor";
         result.rating = get_fallback("rating_poor", "Poor");
         rec = limit_2_4ghz ? get_fallback("rec_poor_2.4ghz", "Poor 2.4GHz") : get_fallback("rec_poor_5ghz", "Poor 5GHz");
     } else {
         // Evaluate based on bandwidth ranges
         if (result.speed_mbps < 5.0f) {
+            result.rating_raw = "Fair";
             result.rating = get_fallback("rating_fair", "Fair");
             rec = get_fallback("rec_fair_low", "Fair low");
         } else if (result.speed_mbps < 10.0f) {
+            result.rating_raw = "Fair";
             result.rating = get_fallback("rating_fair", "Fair");
             rec = get_fallback("rec_fair_mid", "Fair mid");
         } else if (result.speed_mbps < 15.0f) {
+            result.rating_raw = "Good";
             result.rating = get_fallback("rating_good", "Good");
             rec = get_fallback("rec_good_low", "Good low");
         } else if (result.speed_mbps < 30.0f) {
+            result.rating_raw = "Good";
             result.rating = get_fallback("rating_good", "Good");
             rec = get_fallback("rec_good_mid", "Good mid");
         } else {
             if (result.avg_ping_ms <= 12.0f && result.jitter_ms <= 2.0f && result.packet_loss_pct <= 0.1f) {
+                result.rating_raw = "Excellent";
                 result.rating = get_fallback("rating_excellent", "Excellent");
                 rec = get_fallback("rec_excellent", "Excellent");
             } else {
+                result.rating_raw = "Good";
                 result.rating = get_fallback("rating_good", "Good");
                 rec = get_fallback("rec_good_high", "Good high");
             }
@@ -396,6 +402,146 @@ TestResult ConnectionTester::run() {
     result.recommendation = rec;
 
     updateProgress(1.0f, is_es ? "Completado!" : "Completed!");
+    return result;
+}
+
+std::string ConnectionTester::translate(const std::string& key, const std::string& fallback) {
+    auto it = translations.find(key);
+    if (it != translations.end()) {
+        return it->second;
+    }
+    return fallback;
+}
+
+VideoBitrateResult ConnectionTester::runVideoBitrateTest(const std::vector<int>& bitrates) {
+    VideoBitrateResult result;
+    result.success = false;
+    cancelled = false;
+
+    bool is_es = (lang == "es");
+    std::string url = "https://" + ip + ":" + std::to_string(port_https) + "/images/sunshine.ico";
+
+    for (size_t i = 0; i < bitrates.size(); ++i) {
+        if (cancelled) {
+            result.error_message = translate("video_test_cancelling", "Test cancelled by user.");
+            return result;
+        }
+
+        int B = bitrates[i];
+        double target_bytes_per_sec = (B * 1000.0) / 8.0;
+        size_t total_bytes = 0;
+        auto test_start = std::chrono::high_resolution_clock::now();
+        double elapsed_seconds = 0.0;
+        bool curl_error = false;
+
+        std::vector<float> step_latencies;
+        int stutters = 0;
+
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            curl_error = true;
+        } else {
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, speedWriteCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &total_bytes);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+            curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progressCallback);
+            curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, this);
+
+            while (elapsed_seconds < 10.0 && !cancelled) {
+                float total_elapsed = i * 10.0f + static_cast<float>(elapsed_seconds);
+                float progress = total_elapsed / (bitrates.size() * 10.0f);
+                
+                std::string statusMsg = translate("video_test_testing", "Testing {bitrate} Kbps... ({sec}s)");
+                statusMsg = replaceAll(statusMsg, "{bitrate}", std::to_string(B));
+                statusMsg = replaceAll(statusMsg, "{sec}", std::to_string(static_cast<int>(elapsed_seconds)));
+                
+                updateProgress(progress, statusMsg);
+
+                auto req_start = std::chrono::high_resolution_clock::now();
+                CURLcode res = curl_easy_perform(curl);
+                auto req_end = std::chrono::high_resolution_clock::now();
+
+                if (res != CURLE_OK) {
+                    if (res == CURLE_ABORTED_BY_CALLBACK) {
+                        break;
+                    }
+                    curl_error = true;
+                    stutters++;
+                    break;
+                } else {
+                    float req_ms = std::chrono::duration<float, std::milli>(req_end - req_start).count();
+                    step_latencies.push_back(req_ms);
+                    if (req_ms > 100.0f) {
+                        stutters++;
+                    }
+                }
+
+                auto now = std::chrono::high_resolution_clock::now();
+                elapsed_seconds = std::chrono::duration<double>(now - test_start).count();
+
+                // Rate limiting
+                double target_bytes = target_bytes_per_sec * elapsed_seconds;
+                if (total_bytes > target_bytes) {
+                    double excess_bytes = total_bytes - target_bytes;
+                    double sleep_sec = excess_bytes / target_bytes_per_sec;
+                    if (sleep_sec > 0.002) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(sleep_sec * 1000.0)));
+                    }
+                }
+            }
+            curl_easy_cleanup(curl);
+        }
+
+        if (cancelled) {
+            result.error_message = translate("video_test_cancelling", "Test cancelled by user.");
+            return result;
+        }
+
+        BitrateStepResult r;
+        r.bitrate = B;
+        if (elapsed_seconds > 0.0) {
+            r.speed_kbps = (total_bytes * 8.0) / (elapsed_seconds * 1000.0);
+        } else {
+            r.speed_kbps = 0.0f;
+        }
+        r.stable = (!curl_error && r.speed_kbps >= B * 0.9f);
+
+        // Calculate latency metrics
+        if (!step_latencies.empty()) {
+            r.min_latency_ms = *std::min_element(step_latencies.begin(), step_latencies.end());
+            r.max_latency_ms = *std::max_element(step_latencies.begin(), step_latencies.end());
+            r.avg_latency_ms = std::accumulate(step_latencies.begin(), step_latencies.end(), 0.0f) / step_latencies.size();
+            
+            if (step_latencies.size() > 1) {
+                float sum_diff = 0.0f;
+                for (size_t k = 0; k < step_latencies.size() - 1; ++k) {
+                    sum_diff += std::abs(step_latencies[k] - step_latencies[k + 1]);
+                }
+                r.jitter_ms = sum_diff / (step_latencies.size() - 1);
+            } else {
+                r.jitter_ms = 0.0f;
+            }
+        } else {
+            r.min_latency_ms = 0.0f;
+            r.max_latency_ms = 0.0f;
+            r.avg_latency_ms = 0.0f;
+            r.jitter_ms = 0.0f;
+        }
+        r.stutters = stutters;
+
+        result.steps.push_back(r);
+        
+        if (r.stable) {
+            result.highest_stable_bitrate = B;
+        }
+    }
+
+    updateProgress(1.0f, is_es ? "Completado!" : "Completed!");
+    result.success = true;
     return result;
 }
 

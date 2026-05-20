@@ -4,6 +4,7 @@
 #include <functional>
 #include <atomic>
 #include <map>
+#include <vector>
 
 namespace moonbeam {
 
@@ -15,7 +16,8 @@ struct TestResult {
     float jitter_ms = 0.0f;
     float packet_loss_pct = 0.0f;
     float speed_mbps = 0.0f;
-    std::string rating;          // "Excellent", "Good", "Fair", "Poor"
+    std::string rating;          // "Excellent", "Good", "Fair", "Poor" (localized)
+    std::string rating_raw;      // "Excellent", "Good", "Fair", "Poor" (English/raw for logic)
     std::string recommendation;  // Dynamic advice based on console/network
     std::string error_message;
     
@@ -25,6 +27,24 @@ struct TestResult {
     std::string server_state;
 };
 
+struct BitrateStepResult {
+    int bitrate = 0;
+    bool stable = false;
+    float speed_kbps = 0.0f;
+    float avg_latency_ms = 0.0f;
+    float min_latency_ms = 0.0f;
+    float max_latency_ms = 0.0f;
+    float jitter_ms = 0.0f;
+    int stutters = 0;
+};
+
+struct VideoBitrateResult {
+    bool success = false;
+    std::vector<BitrateStepResult> steps;
+    int highest_stable_bitrate = 0;
+    std::string error_message;
+};
+
 class ConnectionTester {
 public:
     ConnectionTester(const std::string& host_ip, bool limit_to_2_4ghz = false, const std::string& device_name = "Device", const std::string& lang_code = "en", int http_port = 47989, int https_port = 47990);
@@ -32,6 +52,12 @@ public:
 
     // Runs the diagnostic test.
     TestResult run();
+
+    // Runs the video bitrate test
+    VideoBitrateResult runVideoBitrateTest(const std::vector<int>& bitrates);
+
+    // Dynamic translate lookup
+    std::string translate(const std::string& key, const std::string& fallback = "");
 
     // Set callback to receive progress updates (progress: 0.0 to 1.0, status: description text)
     void setProgressCallback(std::function<void(float progress, const std::string& status)> cb);
