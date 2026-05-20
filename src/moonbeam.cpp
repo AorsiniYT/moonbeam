@@ -333,101 +333,23 @@ TestResult ConnectionTester::run() {
         return result;
     }
 
-    // 2. Run Speed Test
-    if (!runSpeedTest(result.speed_mbps)) {
-        if (cancelled) {
-            result.error_message = is_es ? "Prueba cancelada por el usuario." : "Test cancelled by user.";
-            return result;
-        }
-        result.error_message = is_es ? "Error al descargar recursos de velocidad. Verifica el servidor HTTPS." : "Failed to download speed assets. Verify host HTTPS server.";
-        return result;
-    }
-
-    updateProgress(0.95f, is_es ? "Finalizando reporte..." : "Finalizing report...");
-
-    result.success = true;
     result.host_name = host_name;
     result.server_version = server_version;
     result.server_state = server_state;
 
-    // 3. Diagnose and Recommend
-    std::string rec;
-
-    if (result.packet_loss_pct > 2.0f || result.avg_ping_ms > 50.0f || result.speed_mbps < 3.0f) {
-        result.rating_raw = "Poor";
-        result.rating = get_fallback("rating_poor", "Poor");
-        rec = limit_2_4ghz ? get_fallback("rec_poor_2.4ghz", "Poor 2.4GHz") : get_fallback("rec_poor_5ghz", "Poor 5GHz");
-    } else {
-        // Evaluate based on bandwidth ranges
-        if (result.speed_mbps < 5.0f) {
-            result.rating_raw = "Fair";
-            result.rating = get_fallback("rating_fair", "Fair");
-            rec = get_fallback("rec_fair_low", "Fair low");
-        } else if (result.speed_mbps < 10.0f) {
-            result.rating_raw = "Fair";
-            result.rating = get_fallback("rating_fair", "Fair");
-            rec = get_fallback("rec_fair_mid", "Fair mid");
-        } else if (result.speed_mbps < 15.0f) {
-            result.rating_raw = "Good";
-            result.rating = get_fallback("rating_good", "Good");
-            rec = get_fallback("rec_good_low", "Good low");
-        } else if (result.speed_mbps < 30.0f) {
-            result.rating_raw = "Good";
-            result.rating = get_fallback("rating_good", "Good");
-            rec = get_fallback("rec_good_mid", "Good mid");
-        } else {
-            if (result.avg_ping_ms <= 12.0f && result.jitter_ms <= 2.0f && result.packet_loss_pct <= 0.1f) {
-                result.rating_raw = "Excellent";
-                result.rating = get_fallback("rating_excellent", "Excellent");
-                rec = get_fallback("rec_excellent", "Excellent");
-            } else {
-                result.rating_raw = "Good";
-                result.rating = get_fallback("rating_good", "Good");
-                rec = get_fallback("rec_good_high", "Good high");
-            }
-        }
-
-        // Append warnings for jitter/packet loss if not classified as Poor
-        if (result.jitter_ms > 5.0f) {
-            rec += " " + get_fallback("rec_high_jitter", "High Jitter");
-        }
-        if (result.packet_loss_pct > 0.5f) {
-            rec += " " + get_fallback("rec_packet_loss", "Packet Loss");
-        }
-    }
-
-    // Dynamic placeholder replacement for {device} name
-    rec = replaceAll(rec, "{device}", device);
-
-    result.recommendation = rec;
-
-    updateProgress(1.0f, is_es ? "Completado!" : "Completed!");
-    return result;
-}
-
-std::string ConnectionTester::translate(const std::string& key, const std::string& fallback) {
-    auto it = translations.find(key);
-    if (it != translations.end()) {
-        return it->second;
-    }
-    return fallback;
-}
-
-VideoBitrateResult ConnectionTester::runVideoBitrateTest(const std::vector<int>& bitrates) {
-    VideoBitrateResult result;
-    result.success = false;
-    cancelled = false;
-
-    bool is_es = (lang == "es");
+    // 2. Run the 6-step Video Bitrate Test
+    std::vector<int> bitrates = {2000, 4000, 6000, 8000, 10000, -1};
     std::string url = "https://" + ip + ":" + std::to_string(port_https) + "/images/sunshine.ico";
 
     for (size_t i = 0; i < bitrates.size(); ++i) {
         if (cancelled) {
-            result.error_message = translate("video_test_cancelling", "Test cancelled by user.");
+            result.error_message = is_es ? "Prueba cancelada por el usuario." : "Test cancelled by user.";
             return result;
         }
 
         int B = bitrates[i];
+        float step_start_progress = 0.05f + (static_cast<float>(i) / bitrates.size()) * 0.90f;
+        
         double target_bytes_per_sec = (B * 1000.0) / 8.0;
         size_t total_bytes = 0;
         auto test_start = std::chrono::high_resolution_clock::now();
@@ -452,14 +374,20 @@ VideoBitrateResult ConnectionTester::runVideoBitrateTest(const std::vector<int>&
             curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, this);
 
             while (elapsed_seconds < 10.0 && !cancelled) {
-                float total_elapsed = i * 10.0f + static_cast<float>(elapsed_seconds);
-                float progress = total_elapsed / (bitrates.size() * 10.0f);
+                float current_step_progress = static_cast<float>(elapsed_seconds / 10.0);
+                float total_progress = step_start_progress + (current_step_progress * (0.90f / bitrates.size()));
                 
-                std::string statusMsg = translate("video_test_testing", "Testing {bitrate} Kbps... ({sec}s)");
-                statusMsg = replaceAll(statusMsg, "{bitrate}", std::to_string(B));
-                statusMsg = replaceAll(statusMsg, "{sec}", std::to_string(static_cast<int>(elapsed_seconds)));
+                std::string statusMsg;
+                if (B == -1) {
+                    statusMsg = translate("video_test_testing_max", "Testing Maximum Bitrate... ({sec}s)");
+                    statusMsg = replaceAll(statusMsg, "{sec}", std::to_string(static_cast<int>(elapsed_seconds)));
+                } else {
+                    statusMsg = translate("video_test_testing", "Testing {bitrate} Kbps... ({sec}s)");
+                    statusMsg = replaceAll(statusMsg, "{bitrate}", std::to_string(B));
+                    statusMsg = replaceAll(statusMsg, "{sec}", std::to_string(static_cast<int>(elapsed_seconds)));
+                }
                 
-                updateProgress(progress, statusMsg);
+                updateProgress(total_progress, statusMsg);
 
                 auto req_start = std::chrono::high_resolution_clock::now();
                 CURLcode res = curl_easy_perform(curl);
@@ -483,13 +411,15 @@ VideoBitrateResult ConnectionTester::runVideoBitrateTest(const std::vector<int>&
                 auto now = std::chrono::high_resolution_clock::now();
                 elapsed_seconds = std::chrono::duration<double>(now - test_start).count();
 
-                // Rate limiting
-                double target_bytes = target_bytes_per_sec * elapsed_seconds;
-                if (total_bytes > target_bytes) {
-                    double excess_bytes = total_bytes - target_bytes;
-                    double sleep_sec = excess_bytes / target_bytes_per_sec;
-                    if (sleep_sec > 0.002) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(sleep_sec * 1000.0)));
+                // Rate limiting (only if not step 6 which has B == -1)
+                if (B != -1) {
+                    double target_bytes = target_bytes_per_sec * elapsed_seconds;
+                    if (total_bytes > target_bytes) {
+                        double excess_bytes = total_bytes - target_bytes;
+                        double sleep_sec = excess_bytes / target_bytes_per_sec;
+                        if (sleep_sec > 0.002) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(sleep_sec * 1000.0)));
+                        }
                     }
                 }
             }
@@ -497,7 +427,7 @@ VideoBitrateResult ConnectionTester::runVideoBitrateTest(const std::vector<int>&
         }
 
         if (cancelled) {
-            result.error_message = translate("video_test_cancelling", "Test cancelled by user.");
+            result.error_message = is_es ? "Prueba cancelada por el usuario." : "Test cancelled by user.";
             return result;
         }
 
@@ -508,7 +438,13 @@ VideoBitrateResult ConnectionTester::runVideoBitrateTest(const std::vector<int>&
         } else {
             r.speed_kbps = 0.0f;
         }
-        r.stable = (!curl_error && r.speed_kbps >= B * 0.9f);
+        
+        if (B == -1) {
+            r.stable = (!curl_error && r.speed_kbps > 10000.0f);
+            result.speed_mbps = r.speed_kbps / 1000.0f;
+        } else {
+            r.stable = (!curl_error && r.speed_kbps >= B * 0.9f);
+        }
 
         // Calculate latency metrics
         if (!step_latencies.empty()) {
@@ -540,9 +476,79 @@ VideoBitrateResult ConnectionTester::runVideoBitrateTest(const std::vector<int>&
         }
     }
 
-    updateProgress(1.0f, is_es ? "Completado!" : "Completed!");
+    if (result.steps.size() >= 6) {
+        const auto& step6 = result.steps[5];
+        if (step6.stable) {
+            result.steps[4].stable = true;
+            if (result.highest_stable_bitrate < 10000) {
+                result.highest_stable_bitrate = 10000;
+            }
+        }
+    }
+
+    updateProgress(0.95f, is_es ? "Finalizando reporte..." : "Finalizing report...");
+
     result.success = true;
+
+    // 3. Diagnose and Recommend
+    std::string rec;
+
+    if (result.packet_loss_pct > 2.0f || result.avg_ping_ms > 50.0f || result.highest_stable_bitrate < 2000) {
+        result.rating_raw = "Poor";
+        result.rating = get_fallback("rating_poor", "Poor");
+        rec = limit_2_4ghz ? get_fallback("rec_poor_2.4ghz", "Poor 2.4GHz") : get_fallback("rec_poor_5ghz", "Poor 5GHz");
+    } else {
+        if (result.highest_stable_bitrate < 4000) {
+            result.rating_raw = "Fair";
+            result.rating = get_fallback("rating_fair", "Fair");
+            rec = get_fallback("rec_fair_low", "Fair low");
+        } else if (result.highest_stable_bitrate < 6000) {
+            result.rating_raw = "Fair";
+            result.rating = get_fallback("rating_fair", "Fair");
+            rec = get_fallback("rec_fair_mid", "Fair mid");
+        } else if (result.highest_stable_bitrate < 8000) {
+            result.rating_raw = "Good";
+            result.rating = get_fallback("rating_good", "Good");
+            rec = get_fallback("rec_good_low", "Good low");
+        } else if (result.highest_stable_bitrate < 10000) {
+            result.rating_raw = "Good";
+            result.rating = get_fallback("rating_good", "Good");
+            rec = get_fallback("rec_good_mid", "Good mid");
+        } else {
+            if (result.avg_ping_ms <= 12.0f && result.jitter_ms <= 2.0f && result.packet_loss_pct <= 0.1f) {
+                result.rating_raw = "Excellent";
+                result.rating = get_fallback("rating_excellent", "Excellent");
+                rec = get_fallback("rec_excellent", "Excellent");
+            } else {
+                result.rating_raw = "Good";
+                result.rating = get_fallback("rating_good", "Good");
+                rec = get_fallback("rec_good_high", "Good high");
+            }
+        }
+
+        if (result.jitter_ms > 5.0f) {
+            rec += " " + get_fallback("rec_high_jitter", "High Jitter");
+        }
+        if (result.packet_loss_pct > 0.5f) {
+            rec += " " + get_fallback("rec_packet_loss", "Packet Loss");
+        }
+    }
+
+    rec = replaceAll(rec, "{device}", device);
+    result.recommendation = rec;
+
+    updateProgress(1.0f, is_es ? "Completado!" : "Completed!");
     return result;
 }
+
+std::string ConnectionTester::translate(const std::string& key, const std::string& fallback) {
+    auto it = translations.find(key);
+    if (it != translations.end()) {
+        return it->second;
+    }
+    return fallback;
+}
+
+
 
 } // namespace moonbeam

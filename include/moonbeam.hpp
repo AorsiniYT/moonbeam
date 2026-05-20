@@ -8,6 +8,17 @@
 
 namespace moonbeam {
 
+struct BitrateStepResult {
+    int bitrate = 0;
+    bool stable = false;
+    float speed_kbps = 0.0f;
+    float avg_latency_ms = 0.0f;
+    float min_latency_ms = 0.0f;
+    float max_latency_ms = 0.0f;
+    float jitter_ms = 0.0f;
+    int stutters = 0;
+};
+
 struct TestResult {
     bool success = false;
     float min_ping_ms = 0.0f;
@@ -25,17 +36,10 @@ struct TestResult {
     std::string host_name;
     std::string server_version;
     std::string server_state;
-};
 
-struct BitrateStepResult {
-    int bitrate = 0;
-    bool stable = false;
-    float speed_kbps = 0.0f;
-    float avg_latency_ms = 0.0f;
-    float min_latency_ms = 0.0f;
-    float max_latency_ms = 0.0f;
-    float jitter_ms = 0.0f;
-    int stutters = 0;
+    // Bitrate steps
+    std::vector<BitrateStepResult> steps;
+    int highest_stable_bitrate = 0;
 };
 
 struct VideoBitrateResult {
@@ -52,9 +56,6 @@ public:
 
     // Runs the diagnostic test.
     TestResult run();
-
-    // Runs the video bitrate test
-    VideoBitrateResult runVideoBitrateTest(const std::vector<int>& bitrates);
 
     // Dynamic translate lookup
     std::string translate(const std::string& key, const std::string& fallback = "");

@@ -22,6 +22,7 @@ std::map<std::string, std::string> get_lang_es() {
         {"video_test_title", "Diagnóstico de Bitrate de Video"},
         {"video_test_confirm_msg", "Esta prueba evaluará la estabilidad de tu red en 5 tasas de bits diferentes (2000, 4000, 6000, 8000 y 10000 Kbps).\n\nCada bitrate se probará durante 10 segundos. La prueba completa tomará aproximadamente 50 segundos.\n\n¿Deseas comenzar?"},
         {"video_test_testing", "Probando {bitrate} Kbps... ({sec}s)"},
+        {"video_test_testing_max", "Probando Bitrate Máximo... ({sec}s)"},
         {"video_test_cancelling", "Cancelando..."},
         {"video_test_cancel", "Cancelar"},
         {"video_test_report_title", "Reporte de Bitrate de Video"},
@@ -29,7 +30,9 @@ std::map<std::string, std::string> get_lang_es() {
         {"video_test_unstable", "Inestable"},
         {"video_test_achieved", "Alcanzado: {speed} Kbps"},
         {"video_test_rec_stable", "Recomendamos configurar tu bitrate de streaming a {speed} Kbps para una calidad óptima."},
-        {"video_test_rec_unstable", "La conexión es inestable. Recomendamos usar una resolución más baja o mejorar la señal de Wi-Fi."}
+        {"video_test_rec_unstable", "La conexión es inestable. Recomendamos usar una resolución más baja o mejorar la señal de Wi-Fi."},
+        {"video_test_max_bitrate", "Máximo"},
+        {"video_test_label", "Estabilidad de Video:"}
     };
 }
 
