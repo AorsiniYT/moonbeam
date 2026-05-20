@@ -6,11 +6,77 @@
 #include <cmath>
 #include <numeric>
 #include <algorithm>
+#include <fstream>
+#include <map>
+#include <sstream>
 
 namespace moonbeam {
 
-ConnectionTester::ConnectionTester(const std::string& host_ip, int http_port, int https_port)
-    : ip(host_ip), port_http(http_port), port_https(https_port), cancelled(false), progress_cb(nullptr) {}
+// Simple, non-dependent JSON line parser for flat key-value files
+static std::map<std::string, std::string> parseSimpleJson(const std::string& filepath) {
+    std::map<std::string, std::string> res;
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        return res;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        // Find key between first set of quotes
+        size_t firstQuote = line.find('"');
+        if (firstQuote == std::string::npos) continue;
+        size_t secondQuote = line.find('"', firstQuote + 1);
+        if (secondQuote == std::string::npos) continue;
+        
+        std::string key = line.substr(firstQuote + 1, secondQuote - firstQuote - 1);
+        
+        size_t colon = line.find(':', secondQuote + 1);
+        if (colon == std::string::npos) continue;
+        
+        // Find value between quotes after the colon
+        size_t thirdQuote = line.find('"', colon + 1);
+        if (thirdQuote == std::string::npos) continue;
+        size_t fourthQuote = line.find('"', thirdQuote + 1);
+        if (fourthQuote == std::string::npos) continue;
+        
+        std::string value = line.substr(thirdQuote + 1, fourthQuote - thirdQuote - 1);
+        res[key] = value;
+    }
+    return res;
+}
+
+// Simple helper to replace all occurrences of a placeholder in a string
+static std::string replaceAll(std::string str, const std::string& from, const std::string& to) {
+    size_t start_pos = 0;
+    while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+        str.replace(start_pos, from.length(), to);
+        start_pos += to.length();
+    }
+    return str;
+}
+
+// Simple XML tag extractor
+static bool extractTag(const std::string& xml, const char* tag, std::string& out) {
+    out.clear();
+    const std::string open = std::string("<") + tag + ">";
+    const std::string close = std::string("</") + tag + ">";
+    size_t p1 = xml.find(open);
+    if (p1 == std::string::npos) return false;
+    p1 += open.size();
+    size_t p2 = xml.find(close, p1);
+    if (p2 == std::string::npos || p2 < p1) return false;
+    out.assign(xml.data() + p1, p2 - p1);
+    return true;
+}
+
+ConnectionTester::ConnectionTester(const std::string& host_ip, bool limit_to_2_4ghz, const std::string& device_name, const std::string& lang_code, int http_port, int https_port)
+    : ip(host_ip), port_http(http_port), port_https(https_port), cancelled(false), progress_cb(nullptr),
+      limit_2_4ghz(limit_to_2_4ghz), device(device_name) {
+    if (lang_code.rfind("es", 0) == 0) {
+        lang = "es";
+    } else {
+        lang = "en";
+    }
+}
 
 ConnectionTester::~ConnectionTester() {}
 
@@ -41,9 +107,18 @@ size_t ConnectionTester::discardWriteCallback(void* contents, size_t size, size_
 size_t ConnectionTester::speedWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
     (void)contents;
     size_t total_size = size * nmemb;
-    size_t* bytes_counter = static_cast<size_t*>(userp);
-    if (bytes_counter) {
-        *bytes_counter += total_size;
+    size_t* total_bytes = static_cast<size_t*>(userp);
+    if (total_bytes) {
+        *total_bytes += total_size;
+    }
+    return total_size;
+}
+
+size_t ConnectionTester::stringWriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+    size_t total_size = size * nmemb;
+    std::string* str = static_cast<std::string*>(userp);
+    if (str) {
+        str->append(static_cast<const char*>(contents), total_size);
     }
     return total_size;
 }
@@ -57,17 +132,32 @@ int ConnectionTester::progressCallback(void* clientp, double dltotal, double dln
     return 0;
 }
 
+std::string ConnectionTester::getTranslation(const std::string& key, const std::string& fallback) {
+    auto it = translations.find(key);
+    if (it != translations.end()) {
+        return it->second;
+    }
+    return fallback;
+}
+
 bool ConnectionTester::runPingTest(float& min_ping, float& max_ping, float& avg_ping, float& jitter, float& loss_pct) {
-    constexpr int total_pings = 30;
+    constexpr int total_pings = 150;
     std::vector<float> pings;
     int failed_count = 0;
+    bool is_es = (lang == "es");
 
     std::string url = "http://" + ip + ":" + std::to_string(port_http) + "/serverinfo";
+
+    std::string xmlResponse;
+    bool info_parsed = false;
 
     for (int i = 0; i < total_pings; ++i) {
         if (cancelled) return false;
 
-        updateProgress((float)i / total_pings * 0.5f, "Measuring latency & jitter (Ping " + std::to_string(i + 1) + "/" + std::to_string(total_pings) + ")...");
+        std::string statusMsg = is_es ? 
+            "Midiendo latencia y jitter (Ping " + std::to_string(i + 1) + "/" + std::to_string(total_pings) + ")..." : 
+            "Measuring latency & jitter (Ping " + std::to_string(i + 1) + "/" + std::to_string(total_pings) + ")...";
+        updateProgress((float)i / total_pings * 0.33f, statusMsg);
 
         CURL* curl = curl_easy_init();
         if (!curl) {
@@ -77,7 +167,13 @@ bool ConnectionTester::runPingTest(float& min_ping, float& max_ping, float& avg_
 
         // Configure curl request
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discardWriteCallback);
+        if (!info_parsed) {
+            xmlResponse.clear();
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stringWriteCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &xmlResponse);
+        } else {
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discardWriteCallback);
+        }
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 400L); // Quick timeout for local network pings
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progressCallback);
@@ -94,6 +190,13 @@ bool ConnectionTester::runPingTest(float& min_ping, float& max_ping, float& avg_
         if (res == CURLE_OK && response_code == 200) {
             float duration = std::chrono::duration<float, std::milli>(end - start).count();
             pings.push_back(duration);
+
+            if (!info_parsed && !xmlResponse.empty()) {
+                extractTag(xmlResponse, "hostname", host_name);
+                extractTag(xmlResponse, "appversion", server_version);
+                extractTag(xmlResponse, "state", server_state);
+                info_parsed = true;
+            }
         } else {
             if (res != CURLE_ABORTED_BY_CALLBACK) {
                 failed_count++;
@@ -103,7 +206,7 @@ bool ConnectionTester::runPingTest(float& min_ping, float& max_ping, float& avg_
         }
 
         // Small delay between pings to get dynamic measurements
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
 
     loss_pct = ((float)failed_count / total_pings) * 100.0f;
@@ -132,44 +235,49 @@ bool ConnectionTester::runPingTest(float& min_ping, float& max_ping, float& avg_
 
 bool ConnectionTester::runSpeedTest(float& speed_mbps) {
     std::string url = "https://" + ip + ":" + std::to_string(port_https) + "/images/sunshine.ico";
+    bool is_es = (lang == "es");
 
     size_t total_bytes = 0;
+    int iterations = 0;
     auto test_start = std::chrono::high_resolution_clock::now();
     double elapsed_seconds = 0.0;
-    constexpr double target_duration = 2.0; // 2 seconds speed test
+    constexpr double target_duration = 15.0; // 15 seconds speed test
 
-    int iterations = 0;
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return false;
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    // Disable SSL certificate verification as Sunshine uses self-signed certs
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, speedWriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &total_bytes);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progressCallback);
+    curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, this);
 
     while (elapsed_seconds < target_duration) {
-        if (cancelled) return false;
-
-        updateProgress(0.5f + (float)(elapsed_seconds / target_duration) * 0.45f, "Measuring download bandwidth...");
-
-        CURL* curl = curl_easy_init();
-        if (!curl) {
+        if (cancelled) {
+            curl_easy_cleanup(curl);
             return false;
         }
 
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        // Disable SSL certificate verification as Sunshine uses self-signed certs
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, speedWriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &total_bytes);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
-        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progressCallback);
-        curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, this);
+        std::string statusMsg = is_es ? "Midiendo ancho de banda de descarga..." : "Measuring download bandwidth...";
+        updateProgress(0.33f + (float)(elapsed_seconds / target_duration) * 0.62f, statusMsg);
 
         CURLcode res = curl_easy_perform(curl);
-        curl_easy_cleanup(curl);
 
         if (res != CURLE_OK) {
             if (res == CURLE_ABORTED_BY_CALLBACK) {
+                curl_easy_cleanup(curl);
                 return false; // User cancelled
             }
             // If the server doesn't respond or file is missing, we fail the test
             if (iterations == 0) {
+                curl_easy_cleanup(curl);
                 return false;
             }
             break; // If subsequent requests fail, break and calculate with what we have
@@ -179,6 +287,8 @@ bool ConnectionTester::runSpeedTest(float& speed_mbps) {
         auto now = std::chrono::high_resolution_clock::now();
         elapsed_seconds = std::chrono::duration<float>(now - test_start).count();
     }
+
+    curl_easy_cleanup(curl);
 
     if (total_bytes == 0 || elapsed_seconds == 0.0) {
         return false;
@@ -194,49 +304,98 @@ TestResult ConnectionTester::run() {
     TestResult result;
     cancelled = false;
 
-    updateProgress(0.0f, "Initializing Connection Test...");
+    // Load translations using normalized lang ("es" or "en")
+    std::string path1 = "resources/moonbeam/lang/" + lang + ".json";
+    translations = parseSimpleJson(path1);
+    if (translations.empty()) {
+        std::string path2 = "third_party/moonbeam/lang/" + lang + ".json";
+        translations = parseSimpleJson(path2);
+    }
+    
+    // Built-in fallback mappings: resolve keys using loaded translations, or fallback to the provided default English string
+    bool is_es = (lang == "es");
+    auto get_fallback = [this](const std::string& key, const std::string& fallback_val) -> std::string {
+        auto it = translations.find(key);
+        if (it != translations.end()) {
+            return it->second;
+        }
+        return fallback_val;
+    };
+
+    updateProgress(0.0f, is_es ? "Inicializando prueba de conexión..." : "Initializing Connection Test...");
 
     // 1. Run Ping Test
     if (!runPingTest(result.min_ping_ms, result.max_ping_ms, result.avg_ping_ms, result.jitter_ms, result.packet_loss_pct)) {
         if (cancelled) {
-            result.error_message = "Test cancelled by user.";
+            result.error_message = is_es ? "Prueba cancelada por el usuario." : "Test cancelled by user.";
             return result;
         }
-        result.error_message = "Failed to communicate with host. Verify host IP and status.";
+        result.error_message = is_es ? "Error de comunicación con el host. Verifica la IP." : "Failed to communicate with host. Verify host IP.";
         return result;
     }
 
     // 2. Run Speed Test
     if (!runSpeedTest(result.speed_mbps)) {
         if (cancelled) {
-            result.error_message = "Test cancelled by user.";
+            result.error_message = is_es ? "Prueba cancelada por el usuario." : "Test cancelled by user.";
             return result;
         }
-        result.error_message = "Failed to download speed assets. Verify host HTTPS server.";
+        result.error_message = is_es ? "Error al descargar recursos de velocidad. Verifica el servidor HTTPS." : "Failed to download speed assets. Verify host HTTPS server.";
         return result;
     }
 
-    updateProgress(0.95f, "Finalizing report...");
+    updateProgress(0.95f, is_es ? "Finalizando reporte..." : "Finalizing report...");
 
     result.success = true;
+    result.host_name = host_name;
+    result.server_version = server_version;
+    result.server_state = server_state;
 
     // 3. Diagnose and Recommend
-    // Criteria weighting
-    if (result.packet_loss_pct > 2.0f || result.avg_ping_ms > 50.0f || result.speed_mbps < 5.0f) {
-        result.rating = "Poor";
-        result.recommendation = "Connection is unstable. High latency or packet loss will cause severe lagging and visual glitches. Switch to a 5GHz WiFi network, move closer to your router, or use an Ethernet connection.";
-    } else if (result.packet_loss_pct > 0.5f || result.avg_ping_ms > 25.0f || result.jitter_ms > 5.0f || result.speed_mbps < 15.0f) {
-        result.rating = "Fair";
-        result.recommendation = "Connection is average. You might experience occasional micro-stutters. Recommended settings: Native resolution (e.g. 544p for PS Vita, 720p for Wii U) at 30 FPS, and set the bitrate between 5 to 10 Mbps. Enabling HEVC is highly advised.";
-    } else if (result.avg_ping_ms > 12.0f || result.jitter_ms > 2.0f || result.speed_mbps < 30.0f) {
-        result.rating = "Good";
-        result.recommendation = "Connection is stable. Good for smooth gameplay. Recommended settings: Native resolution (544p/720p) at 60 FPS, with a bitrate between 10 to 18 Mbps. Experience should be fluid.";
+    std::string rec;
+
+    if (result.packet_loss_pct > 2.0f || result.avg_ping_ms > 50.0f || result.speed_mbps < 3.0f) {
+        result.rating = get_fallback("rating_poor", "Poor");
+        rec = limit_2_4ghz ? get_fallback("rec_poor_2.4ghz", "Poor 2.4GHz") : get_fallback("rec_poor_5ghz", "Poor 5GHz");
     } else {
-        result.rating = "Excellent";
-        result.recommendation = "Outstanding connection. Perfect latency and bandwidth. Recommended settings: Stream at maximum native resolution, 60 FPS, with a bitrate of 20+ Mbps. Very close to native, lag-free gameplay.";
+        // Evaluate based on bandwidth ranges
+        if (result.speed_mbps < 5.0f) {
+            result.rating = get_fallback("rating_fair", "Fair");
+            rec = get_fallback("rec_fair_low", "Fair low");
+        } else if (result.speed_mbps < 10.0f) {
+            result.rating = get_fallback("rating_fair", "Fair");
+            rec = get_fallback("rec_fair_mid", "Fair mid");
+        } else if (result.speed_mbps < 15.0f) {
+            result.rating = get_fallback("rating_good", "Good");
+            rec = get_fallback("rec_good_low", "Good low");
+        } else if (result.speed_mbps < 30.0f) {
+            result.rating = get_fallback("rating_good", "Good");
+            rec = get_fallback("rec_good_mid", "Good mid");
+        } else {
+            if (result.avg_ping_ms <= 12.0f && result.jitter_ms <= 2.0f && result.packet_loss_pct <= 0.1f) {
+                result.rating = get_fallback("rating_excellent", "Excellent");
+                rec = get_fallback("rec_excellent", "Excellent");
+            } else {
+                result.rating = get_fallback("rating_good", "Good");
+                rec = get_fallback("rec_good_high", "Good high");
+            }
+        }
+
+        // Append warnings for jitter/packet loss if not classified as Poor
+        if (result.jitter_ms > 5.0f) {
+            rec += " " + get_fallback("rec_high_jitter", "High Jitter");
+        }
+        if (result.packet_loss_pct > 0.5f) {
+            rec += " " + get_fallback("rec_packet_loss", "Packet Loss");
+        }
     }
 
-    updateProgress(1.0f, "Completed!");
+    // Dynamic placeholder replacement for {device} name
+    rec = replaceAll(rec, "{device}", device);
+
+    result.recommendation = rec;
+
+    updateProgress(1.0f, is_es ? "Completado!" : "Completed!");
     return result;
 }
 

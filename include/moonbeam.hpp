@@ -3,6 +3,7 @@
 #include <string>
 #include <functional>
 #include <atomic>
+#include <map>
 
 namespace moonbeam {
 
@@ -17,11 +18,16 @@ struct TestResult {
     std::string rating;          // "Excellent", "Good", "Fair", "Poor"
     std::string recommendation;  // Dynamic advice based on console/network
     std::string error_message;
+    
+    // Server metadata
+    std::string host_name;
+    std::string server_version;
+    std::string server_state;
 };
 
 class ConnectionTester {
 public:
-    ConnectionTester(const std::string& host_ip, int http_port = 47989, int https_port = 47990);
+    ConnectionTester(const std::string& host_ip, bool limit_to_2_4ghz = false, const std::string& device_name = "Device", const std::string& lang_code = "en", int http_port = 47989, int https_port = 47990);
     ~ConnectionTester();
 
     // Runs the diagnostic test.
@@ -43,6 +49,19 @@ private:
     std::atomic<bool> cancelled;
     std::function<void(float, const std::string&)> progress_cb;
 
+    bool limit_2_4ghz;
+    std::string device;
+    std::string lang;
+    std::map<std::string, std::string> translations;
+
+    // Server metadata parsed from /serverinfo
+    std::string host_name;
+    std::string server_version;
+    std::string server_state;
+
+    // Helper to get translated string with fallback
+    std::string getTranslation(const std::string& key, const std::string& fallback);
+
     // Internal execution functions
     bool runPingTest(float& min_ping, float& max_ping, float& avg_ping, float& jitter, float& loss_pct);
     bool runSpeedTest(float& speed_mbps);
@@ -51,7 +70,9 @@ private:
     // Libcurl helper callbacks
     static size_t discardWriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
     static size_t speedWriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
+    static size_t stringWriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
     static int progressCallback(void* clientp, double dltotal, double dlnow, double ultotal, double ulnow);
 };
 
 } // namespace moonbeam
+
